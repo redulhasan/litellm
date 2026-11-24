@@ -158,7 +158,7 @@ describe("control plane dashboard mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Virtual Keys" }));
     expect(await screen.findByRole("heading", { name: "Control Plane Login" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Your control plane session expired. Sign in again.");
-    expect(sessionStorage.getItem(controlPlaneSessionKey(prefix))).toBeNull();
+    await waitFor(() => expect(sessionStorage.getItem(controlPlaneSessionKey(prefix))).toBeNull());
     await submitLogin();
   });
 
