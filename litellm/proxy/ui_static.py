@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 from collections.abc import Mapping
@@ -95,14 +96,19 @@ class _MountedUIFiles(StaticFiles):
         )
         if not isinstance(response, FileResponse):
             return response
-        if str(response.path).endswith(_REWRITABLE_ASSETS):
+        may_rewrite: Final = str(response.path).endswith(_REWRITABLE_ASSETS)
+        encoded_root: Final = quote(root)
+        if may_rewrite:
+            mounted_etag: Final = hashlib.sha256(f"{response.headers['etag']}:{encoded_root}".encode()).hexdigest()
+            response.headers["etag"] = f'"{mounted_etag}"'
+        if response.status_code == 200 and self.is_not_modified(response.headers, headers):
+            return NotModifiedResponse(response.headers)
+        if may_rewrite:
             rewritten: Final = await _rewrite_mounted_asset(
-                response, quote(root), head=request_scope["method"] == "HEAD"
+                response, encoded_root, head=request_scope["method"] == "HEAD"
             )
             if rewritten is not None:
                 return rewritten
-        if response.status_code == 200 and self.is_not_modified(response.headers, headers):
-            return NotModifiedResponse(response.headers)
         return response
 
 
@@ -114,7 +120,12 @@ async def _rewrite_mounted_asset(response: FileResponse, root_path: str, *, head
     rewritten: Final = _with_server_root(content, root_path)
     if rewritten == content:
         return None
-    result: Final = Response(rewritten, status_code=response.status_code, media_type=response.media_type)
+    result: Final = Response(
+        rewritten,
+        status_code=response.status_code,
+        headers={"etag": response.headers["etag"], "last-modified": response.headers["last-modified"]},
+        media_type=response.media_type,
+    )
     if head:
         result.body = b""
     return result
