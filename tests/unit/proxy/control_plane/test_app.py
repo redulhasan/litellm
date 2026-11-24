@@ -1,5 +1,6 @@
 from datetime import timedelta
 from itertools import repeat
+from os import utime
 from pathlib import Path
 from typing import Final
 
@@ -162,6 +163,55 @@ def test_control_plane_ui_uses_its_asgi_mount_prefix(tmp_path: Path, monkeypatch
     assert client.get("/mounted/.well-known/litellm-ui-config").json()["server_root_path"] == "/mounted"
     assert original.text == html
     assert unmounted.get(asset_path).text == script
+
+
+def test_mounted_ui_revalidates_rewritten_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LITELLM_UI_PATH", str(tmp_path))
+    (tmp_path / "index.html").write_text("<html>Dashboard</html>", encoding="utf-8")
+    assets: Final = tmp_path / "_next"
+    assets.mkdir()
+    script: Final = assets / "dashboard.js"
+    script.write_text('const prefix = "/litellm-asset-prefix";', encoding="utf-8")
+    timestamp: Final = 1_700_000_000
+    utime(script, (timestamp, timestamp))
+    app: Final = create_app(build_container(_settings()), Licensed())
+    parent: Final = FastAPI()
+    parent.mount("/first", app)
+    parent.mount("/second", app)
+    client: Final = TestClient(parent)
+    path: Final = "/first/_next/dashboard.js"
+
+    response: Final = client.get(path)
+    assert response.status_code == 200
+    assert response.text == 'const prefix = "/first";'
+    assert "etag" in response.headers
+    etag: Final = response.headers["etag"]
+    last_modified: Final = response.headers["last-modified"]
+    head: Final = client.head(path)
+    assert head.content == b""
+    assert head.headers["etag"] == etag
+    assert head.headers["content-length"] == str(len(response.content))
+
+    other: Final = client.get(
+        "/second/_next/dashboard.js",
+        headers={"If-None-Match": etag, "If-Modified-Since": last_modified},
+    )
+    assert other.status_code == 200
+    assert other.text == 'const prefix = "/second";'
+    assert other.headers["etag"] != etag
+
+    revalidated: Final = client.get(path, headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+    assert revalidated.content == b""
+    assert revalidated.headers["etag"] == etag
+    assert client.head(path, headers={"If-Modified-Since": last_modified}).status_code == 304
+
+    script.write_text('const PREFIX = "/litellm-asset-prefix";', encoding="utf-8")
+    utime(script, (timestamp + 1, timestamp + 1))
+    updated: Final = client.get(path, headers={"If-None-Match": etag, "If-Modified-Since": last_modified})
+    assert updated.status_code == 200
+    assert updated.text == 'const PREFIX = "/first";'
+    assert updated.headers["etag"] != etag
 
 
 @pytest.mark.parametrize(
